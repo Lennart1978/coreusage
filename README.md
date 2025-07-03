@@ -32,6 +32,12 @@ This will build the binary: "coreusage"
 sudo make install
 ```
 
+### Uninstall 
+
+```bash
+sudo make uninstall
+```
+
 ## License
 
 This project is released under MIT license
