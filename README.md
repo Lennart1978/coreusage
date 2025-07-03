@@ -2,10 +2,6 @@
 
 A small Linux CLI tool for displaying CPU usage.
 
-## Author
-
-(2025) Lennart Martens
-
 ## Description
 
 CLI program to display current CPU usage. It is intended for Linux users and designed as a lightweight command-line tool.
@@ -32,16 +28,20 @@ This will build the binary: "coreusage"
 sudo make install
 ```
 
-### Uninstall 
+## Uninstall 
 
 ```bash
 sudo make uninstall
 ```
 
+## Screenshot
+
+![screenshot](screenshot.jpg)
+
 ## License
 
 This project is released under MIT license
 
-## Screenshot
+## Author
 
-![screenshot](screenshot.jpg)
+(2025) Lennart Martens
