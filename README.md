@@ -1,6 +1,6 @@
 # coreusage
 
-A small CLI tool for displaying CPU usage.
+A small Linux CLI tool for displaying CPU usage.
 
 ## Author
 
