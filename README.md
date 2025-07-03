@@ -1,4 +1,4 @@
-# coretemps
+# coreusage
 
 A small CLI tool for displaying CPU usage.
 
