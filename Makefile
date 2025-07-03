@@ -24,6 +24,7 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/
 	install -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)/
+	sudo mandb > /dev/null 2>&1
 	@echo "Installation completed"
 
 uninstall:
