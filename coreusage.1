@@ -1,1 +1,51 @@
-test
+.TH COREUSAGE 1 "July 2025" "Version 1.0" "User Commands"
+.SH NAME
+coreusage \- display CPU usage and frequency information for each core
+.SH SYNOPSIS
+.B coreusage
+.SH DESCRIPTION
+.B coreusage
+is a lightweight command-line tool that displays real-time CPU usage and frequency information for each CPU core in a Linux system. It shows a graphical representation of CPU load using colored progress bars.
+.SH DISPLAY
+The program shows the following information for each CPU core:
+.IP \[bu] 2
+Core number
+.IP \[bu]
+Current usage percentage
+.IP \[bu]
+Current frequency in MHz
+.IP \[bu]
+Load visualization with a colored progress bar:
+.RS
+.IP \[bu] 2
+Green: usage below 50%
+.IP \[bu]
+Yellow: usage between 50% and 80%
+.IP \[bu]
+Red: usage above 80%
+.RE
+.SH INTERFACE
+The display updates automatically every second. The information is presented in a centered format with clear visual indicators.
+.SH CONTROLS
+.IP \[bu] 2
+Press 'q' or ESC to quit the program
+.SH REQUIREMENTS
+.IP \[bu] 2
+Linux operating system
+.IP \[bu]
+libsensors (usually provided by the lm_sensors package)
+.SH FILES
+.IP \[bu] 2
+/proc/stat \- Used to read CPU statistics
+.IP \[bu]
+/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq \- Used to read current CPU frequencies
+.SH AUTHOR
+Written by Lennart Martens
+.SH COPYRIGHT
+Copyright \(co 2025 Lennart Martens
+.br
+License: MIT
+.SH BUGS
+Report bugs to: https://github.com/Lennart1978/coreusage/issues
+.SH SEE ALSO
+top(1), htop(1), mpstat(1)
