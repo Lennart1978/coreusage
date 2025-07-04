@@ -345,6 +345,13 @@ int main()
     {
         // Clear screen using ANSI escape codes
         printf("\033[H\033[J");
+
+        // Load default config file
+        if (sensors_init(NULL) != 0)
+        {
+            fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
+            return EXIT_FAILURE;
+        }
         // Print CPU usage and frequency for all cores
         print_core_usage_bars();
         // Print quit message centered
@@ -376,10 +383,11 @@ int main()
     // Restore terminal settings
     set_nonblocking_terminal(0);
     // Print exit message centered
-    if (print_centered("Version: " VERSION " - Exiting...\n") == -1)
+    if (print_centered("coreusage v." VERSION " - libsensors v.%s - Exiting...\n", libsensors_version != NULL ? libsensors_version : "unknown") == -1)
     {
         fprintf(stderr, "Error: Could not print centered exit message.\n");
         return EXIT_FAILURE;
     }
+    sensors_cleanup();
     return 0;
 }
