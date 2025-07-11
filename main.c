@@ -26,6 +26,8 @@
 #define KEY_ESC 27
 #define STAT_FILE "/proc/stat"
 
+static int terminal_modified = 0;
+
 // Helper function: Print a colored progress bar for CPU usage
 // Prints a horizontal bar with color depending on the usage percentage.
 void print_bar(float percent)
@@ -60,6 +62,7 @@ int print_centered(const char *fmt, ...)
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1)
     {
         fprintf(stderr, "Error: Could not get terminal size: %s\n", strerror(errno));
+        printf("]%s", COLOR_RESET);
         return -1;
     }
     int width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
@@ -72,6 +75,7 @@ int print_centered(const char *fmt, ...)
     if (n < 0)
     {
         fprintf(stderr, "Error: Formatting failed.\n");
+        printf("]%s", COLOR_RESET);
         return -1;
     }
     int len = strlen(buf);
@@ -94,6 +98,7 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
     if (!fp)
     {
         fprintf(stderr, "Error: Could not open %s: %s\n", STAT_FILE, strerror(errno));
+        printf("]%s", COLOR_RESET);
         return -1;
     }
     char line[256];
@@ -154,6 +159,7 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
     if (fclose(fp) != 0)
     {
         fprintf(stderr, "Error: Could not close %s: %s\n", STAT_FILE, strerror(errno));
+        printf("]%s", COLOR_RESET);
     }
     return 0;
 }
@@ -170,17 +176,21 @@ void print_core_usage_bars()
     if (read_cpu_stats(user1, nice1, system1, idle1, cpu_ids, &num_cpus) != 0)
     {
         fprintf(stderr, "Error: Could not read CPU statistics.\n");
+        printf("]%s", COLOR_RESET);
         return;
     }
     // Wait for the next sample
     if (usleep(TIME_BETWEEN_SAMPLES_US) != 0)
     {
         fprintf(stderr, "Error: usleep failed: %s\n", strerror(errno));
+        printf("]%s", COLOR_RESET);
+        return;
     }
     // Second read: get updated CPU stats
     if (read_cpu_stats(user2, nice2, system2, idle2, cpu_ids, &num_cpus) != 0)
     {
         fprintf(stderr, "Error: Could not read CPU statistics (second measurement).\n");
+        printf("]%s", COLOR_RESET);
         return;
     }
     printf("\n");
@@ -197,6 +207,7 @@ void print_core_usage_bars()
     if (n < 0 || n >= (int)sizeof(line_template))
     {
         fprintf(stderr, "Error: snprintf failed.\n");
+        printf("]%s", COLOR_RESET);
         return;
     }
     int len = strlen(line_template) + BAR_WIDTH + strlen(COLOR_RESET) + 2;
@@ -206,6 +217,7 @@ void print_core_usage_bars()
     if (print_centered("=== CPU Usage & Frequency per Core ===\n\n") == -1)
     {
         fprintf(stderr, "Error: Could not print centered title.\n");
+        printf("]%s", COLOR_RESET);
         return;
     }
     // Print table header
@@ -289,6 +301,7 @@ void set_nonblocking_terminal(int enable)
         if (tcgetattr(STDIN_FILENO, &oldt) == -1)
         {
             perror("Error: tcgetattr failed");
+            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
         newt = oldt;
@@ -297,12 +310,14 @@ void set_nonblocking_terminal(int enable)
         if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) == -1)
         {
             perror("Error: tcsetattr failed");
+            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
         // Set non-blocking input
         if (fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == -1)
         {
             perror("Error: fcntl (O_NONBLOCK) failed");
+            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
     }
@@ -312,10 +327,14 @@ void set_nonblocking_terminal(int enable)
         if (tcsetattr(STDIN_FILENO, TCSANOW, &oldt) == -1)
         {
             perror("Error: tcsetattr (restore) failed");
+            printf("]%s", COLOR_RESET);
+            exit(EXIT_FAILURE);
         }
         if (fcntl(STDIN_FILENO, F_SETFL, 0) == -1)
         {
             perror("Error: fcntl (restore) failed");
+            printf("]%s", COLOR_RESET);
+            exit(EXIT_FAILURE);
         }
     }
 }
@@ -324,8 +343,13 @@ void set_nonblocking_terminal(int enable)
 // Restores terminal settings and exits the program
 void handle_sigint(int sig)
 {
-    set_nonblocking_terminal(0);
+    if (terminal_modified && isatty(STDIN_FILENO))
+    {
+        set_nonblocking_terminal(0);
+        terminal_modified = 0;
+    }
     printf("\nProgram terminated by signal.\n");
+    printf("%s", COLOR_RESET);
     exit(0);
 }
 
@@ -337,9 +361,14 @@ int main()
     if (signal(SIGINT, handle_sigint) == SIG_ERR)
     {
         fprintf(stderr, "Error: Could not set signal handler: %s\n", strerror(errno));
+        printf("]%s", COLOR_RESET);
         return EXIT_FAILURE;
     }
-    set_nonblocking_terminal(1);
+    if (isatty(STDIN_FILENO))
+    {
+        set_nonblocking_terminal(1);
+        terminal_modified = 1;
+    }
     int quit = 0;
     while (!quit)
     {
@@ -350,6 +379,7 @@ int main()
         if (sensors_init(NULL) != 0)
         {
             fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
+            printf("]%s", COLOR_RESET);
             return EXIT_FAILURE;
         }
         // Print CPU usage and frequency for all cores
@@ -358,12 +388,14 @@ int main()
         if (print_centered("\nPress 'q' or ESC to quit.\n") == -1)
         {
             fprintf(stderr, "Error: Could not print centered quit message.\n");
+            printf("]%s", COLOR_RESET);
             return EXIT_FAILURE;
         }
         // Flush output
         if (fflush(stdout) == EOF)
         {
             perror("Error: fflush failed");
+            printf("]%s", COLOR_RESET);
         }
         // Poll for user input every 50ms, up to 1 second
         for (int i = 0; i < 10; ++i)
@@ -377,15 +409,21 @@ int main()
             if (usleep(TIME_BETWEEN_KEY_POLL_US) != 0)
             {
                 fprintf(stderr, "Error: usleep failed: %s\n", strerror(errno));
+                printf("]%s", COLOR_RESET);
             }
         }
     }
     // Restore terminal settings
-    set_nonblocking_terminal(0);
+    if (terminal_modified && isatty(STDIN_FILENO))
+    {
+        set_nonblocking_terminal(0);
+        terminal_modified = 0;
+    }
     // Print exit message centered
     if (print_centered("coreusage v." VERSION " - libsensors v.%s - Exiting...\n", libsensors_version != NULL ? libsensors_version : "unknown") == -1)
     {
         fprintf(stderr, "Error: Could not print centered exit message.\n");
+        printf("]%s", COLOR_RESET);
         return EXIT_FAILURE;
     }
     sensors_cleanup();
