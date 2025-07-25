@@ -21,7 +21,7 @@
 #include <signal.h>
 #include <errno.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 #define MAX_CPUS 256 // Maximum number of CPU cores supported
 #define BAR_WIDTH 40 // Width of the usage bar
 #define COLOR_RESET "\033[0m"
@@ -298,6 +298,83 @@ void print_core_usage_bars()
     }
 }
 
+// Helper function: Prints the CPU temperature
+void print_cpu_temperature()
+{
+    const sensors_chip_name *chip;
+    int chip_nr = 0;
+    int found = 0;
+    double temp_value = 0.0;
+    char label_buf[128] = "";
+    // Iterate over all chips
+    while ((chip = sensors_get_detected_chips(NULL, &chip_nr)) != NULL)
+    {
+        const sensors_feature *feature;
+        int feat_nr = 0;
+        // Iterate over all features of the chip
+        while ((feature = sensors_get_features(chip, &feat_nr)) != NULL)
+        {
+            if (feature->type == SENSORS_FEATURE_TEMP)
+            {
+                const sensors_subfeature *subf = sensors_get_subfeature(chip, feature, SENSORS_SUBFEATURE_TEMP_INPUT);
+                if (subf)
+                {
+                    double value = 0.0;
+                    if (sensors_get_value(chip, subf->number, &value) == 0)
+                    {
+                        // Get label
+                        const char *label = sensors_get_label(chip, feature);
+                        if (label)
+                        {
+                            snprintf(label_buf, sizeof(label_buf), "%s", label);
+                        }
+                        else
+                        {
+                            snprintf(label_buf, sizeof(label_buf), "Temp");
+                        }
+                        temp_value = value;
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (found)
+            break;
+    }
+    if (found)
+    {
+        // Build temperature line exactly like a core line
+        struct winsize w;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1)
+            w.ws_col = TERM_WIDTH_FALLBACK;
+        int width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
+        // Dummy-Label and dummy frequency for harmonic line
+        char line[256];
+        snprintf(line, sizeof(line), "CPU Temp: %3.1f°C ", temp_value);
+        int len = strlen(line) + BAR_WIDTH + strlen(COLOR_RESET) + 2;
+        int pad = (width - len) / 2;
+        if (pad < 0)
+            pad = 0;
+        if (pad > 0)
+            printf("\n%*s%s", pad, "", line);
+        else
+            printf("\n%s", line);
+        // Normalize temperature to 0-100% (when >100°C, the bar is full)
+        float percent = temp_value;
+        if (percent < 0)
+            percent = 0;
+        if (percent > 100)
+            percent = 100;
+        print_bar(percent);
+        printf("\n");
+    }
+    else
+    {
+        print_centered("CPU temperature: not available\n");
+    }
+}
+
 // Set terminal to non-canonical mode for non-blocking input
 // If enable is 1, set non-blocking mode; if 0, restore previous settings
 void set_nonblocking_terminal(int enable)
@@ -392,6 +469,8 @@ int main()
         }
         // Print CPU usage and frequency for all cores
         print_core_usage_bars();
+        // Print CPU temperature
+        print_cpu_temperature();
         // Print quit message centered
         if (print_centered("\nPress 'q' or ESC to quit.\n") == -1)
         {

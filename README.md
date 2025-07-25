@@ -28,7 +28,7 @@ This will build the binary: "coreusage"
 sudo make install
 ```
 
-## Uninstall 
+## Uninstall
 
 ```bash
 sudo make uninstall
