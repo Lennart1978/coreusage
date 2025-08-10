@@ -1,8 +1,13 @@
-.TH COREUSAGE 1 "July 2025" "Version 1.0.1" "User Commands"
+.TH COREUSAGE 1 "July 2025" "Version 1.0.2" "User Commands"
 .SH NAME
 coreusage \- display CPU usage and frequency information for each core
 .SH SYNOPSIS
 .B coreusage
+.RI [ --interval " " ms ]
+.RI [ --bar-width " " n ]
+.RI [ --no-color ]
+.RI [ --no-temp ]
+.RI [ --help ]
 .SH DESCRIPTION
 .B coreusage
 is a lightweight command-line tool that displays real-time CPU usage and frequency information for each CPU core in a Linux system. It shows a graphical representation of CPU load using colored progress bars.
@@ -24,8 +29,25 @@ Yellow: usage between 50% and 80%
 .IP \[bu]
 Red: usage above 80%
 .RE
+.SH OPTIONS
+.TP
+.BI --interval= ms
+Set the sampling interval in milliseconds (default: 200).
+.TP
+.BI --bar-width= n
+Set the width of the load bar (default: 40).
+.TP
+.B --no-color
+Disable ANSI color output (useful for pipes/logs).
+.TP
+.B --no-temp
+Hide the temperature line.
+.TP
+.B --help
+Show a brief usage message and exit.
+
 .SH INTERFACE
-The display updates automatically every 500ms. The information is presented in a centered format with clear visual indicators.
+The display updates automatically at the configured interval. Output is centered when writing to a TTY. When output is piped, a sensible non-colored layout is used.
 .SH CONTROLS
 .IP \[bu] 2
 Press 'q' or ESC to quit the program

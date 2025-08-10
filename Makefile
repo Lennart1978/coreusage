@@ -1,6 +1,8 @@
 CC=gcc
-CFLAGS=-Wall -O3 -s
-LDFLAGS=-lsensors
+CPPFLAGS+=-D_POSIX_C_SOURCE=200809L
+CFLAGS?=-O3 -std=c23
+CFLAGS+=-Wall -Wextra -Wpedantic
+LDLIBS+=-lsensors
 
 # Verzeichnisse
 PREFIX=/usr/local
@@ -17,15 +19,14 @@ MANPAGE=coreusage.1
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $(TARGET) $(LDLIBS)
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/
 	install -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)/
-	sudo mandb > /dev/null 2>&1
-	@echo "Installation completed"
+	@echo "Installed $(TARGET) to $(DESTDIR)$(BINDIR)"
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
@@ -34,3 +35,9 @@ uninstall:
 
 clean:
 	rm -f $(TARGET)
+
+debug: CFLAGS+=-Og -g -fsanitize=address,undefined
+debug: clean $(TARGET)
+
+update-mandb:
+	mandb > /dev/null 2>&1 || true

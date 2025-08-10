@@ -4,13 +4,14 @@
 | |  | | | | |_) |  _| | | | \___ \ / _ \| |  _|  _|  
 | |__| |_| |  _ <| |___| |_| |___) / ___ \ |_| | |___ 
  \____\___/|_| \_\_____|\___/|____/_/   \_\____|_____|
-                                                      
+                                                       
 */
+
+#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <sensors/sensors.h>
 #include <sensors/error.h>
 #include <unistd.h>
@@ -21,8 +22,10 @@
 #include <stdarg.h>
 #include <signal.h>
 #include <errno.h>
+#include <time.h>
+#include <getopt.h>
 
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 #define MAX_CPUS 256 // Maximum number of CPU cores supported
 #define BAR_WIDTH 40 // Width of the usage bar
 #define COLOR_RESET "\033[0m"
@@ -36,13 +39,22 @@
 #define STAT_FILE "/proc/stat"
 
 static int terminal_modified = 0;
+static volatile sig_atomic_t g_should_terminate = 0;
+static volatile sig_atomic_t g_winch = 0;
+
+// Runtime-configurable settings
+static int g_bar_width = BAR_WIDTH;
+static int g_use_color = 1;
+static int g_show_temp = 1;
+static int g_interval_us = TIME_BETWEEN_SAMPLES_US;
 
 // Helper function: Print a colored progress bar for CPU usage
 // Prints a horizontal bar with color depending on the usage percentage.
 void print_bar(float percent)
 {
     // Calculate how many bar segments should be filled
-    int filled = (int)(percent * BAR_WIDTH / 100.0f);
+    int filled = (int)(percent * g_bar_width / 100.0f);
+    int tty = isatty(STDOUT_FILENO);
     const char *color;
     // Choose color based on usage percentage
     if (percent < 50)
@@ -51,15 +63,21 @@ void print_bar(float percent)
         color = COLOR_YELLOW;
     else
         color = COLOR_RED;
-    printf("%s[", color);
-    for (int i = 0; i < BAR_WIDTH; ++i)
+    if (g_use_color && tty)
+        printf("%s[", color);
+    else
+        printf("[");
+    for (int i = 0; i < g_bar_width; ++i)
     {
         if (i < filled)
             printf("█");
         else
             printf(" ");
     }
-    printf("]%s", COLOR_RESET);
+    if (g_use_color && tty)
+        printf("]%s", COLOR_RESET);
+    else
+        printf("]");
 }
 
 // Helper function: Print a formatted line centered in the terminal
@@ -67,14 +85,16 @@ void print_bar(float percent)
 int print_centered(const char *fmt, ...)
 {
     struct winsize w;
-    // Try to get terminal width
+    // Try to get terminal width; fall back silently if not a TTY
+    int width;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1)
     {
-        fprintf(stderr, "Error: Could not get terminal size: %s\n", strerror(errno));
-        printf("]%s", COLOR_RESET);
-        return -1;
+        width = TERM_WIDTH_FALLBACK;
     }
-    int width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
+    else
+    {
+        width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
+    }
     char buf[512];
     va_list args;
     va_start(args, fmt);
@@ -84,7 +104,6 @@ int print_centered(const char *fmt, ...)
     if (n < 0)
     {
         fprintf(stderr, "Error: Formatting failed.\n");
-        printf("]%s", COLOR_RESET);
         return -1;
     }
     int len = strlen(buf);
@@ -100,14 +119,13 @@ int print_centered(const char *fmt, ...)
 // Reads CPU usage statistics per core from /proc/stat
 // If cpu_ids is NULL or *num_cpus == 0, it initializes cpu_ids and returns the number of CPUs
 // Otherwise, it updates the usage values for the given cpu_ids
-int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigned long long system[], unsigned long long idle[], int cpu_ids[], int *num_cpus)
+int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigned long long system[], unsigned long long idle[], unsigned long long total[], int cpu_ids[], int *num_cpus)
 {
     // Open /proc/stat for reading
     FILE *fp = fopen(STAT_FILE, "r");
     if (!fp)
     {
         fprintf(stderr, "Error: Could not open %s: %s\n", STAT_FILE, strerror(errno));
-        printf("]%s", COLOR_RESET);
         return -1;
     }
     char line[256];
@@ -121,15 +139,24 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
             if (strncmp(line, "cpu", 3) != 0 || !isdigit(line[3]))
                 continue;
             int cpu_id;
-            unsigned long long u, n, s, idl;
-            // Parse CPU stats
-            if (sscanf(line, "cpu%d %llu %llu %llu %llu", &cpu_id, &u, &n, &s, &idl) == 5 && found_cpus < MAX_CPUS)
+            unsigned long long u = 0, n = 0, s = 0, idl = 0, iw = 0, irq = 0, soft = 0, steal = 0, guest = 0, guest_nice = 0;
+            // Parse CPU stats (accept variable field count)
+            int matched = sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+                                 &cpu_id, &u, &n, &s, &idl, &iw, &irq, &soft, &steal, &guest, &guest_nice);
+            if (matched >= 5 && found_cpus < MAX_CPUS)
             {
                 cpu_ids[found_cpus] = cpu_id;
                 user[found_cpus] = u;
                 nice[found_cpus] = n;
                 system[found_cpus] = s;
-                idle[found_cpus] = idl;
+                // Treat idle as idle + iowait when available
+                unsigned long long idle_agg = idl + (matched >= 6 ? iw : 0);
+                idle[found_cpus] = idle_agg;
+                // Total is sum of available fields
+                unsigned long long t = u + n + s + idl + (matched >= 6 ? iw : 0) + (matched >= 7 ? irq : 0) +
+                                      (matched >= 8 ? soft : 0) + (matched >= 9 ? steal : 0) +
+                                      (matched >= 10 ? guest : 0) + (matched >= 11 ? guest_nice : 0);
+                total[found_cpus] = t;
                 found_cpus++;
             }
         }
@@ -144,8 +171,10 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
             if (strncmp(line, "cpu", 3) != 0 || !isdigit(line[3]))
                 continue;
             int cpu_id;
-            unsigned long long u, n, s, idl;
-            if (sscanf(line, "cpu%d %llu %llu %llu %llu", &cpu_id, &u, &n, &s, &idl) == 5)
+            unsigned long long u = 0, n = 0, s = 0, idl = 0, iw = 0, irq = 0, soft = 0, steal = 0, guest = 0, guest_nice = 0;
+            int matched = sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+                                 &cpu_id, &u, &n, &s, &idl, &iw, &irq, &soft, &steal, &guest, &guest_nice);
+            if (matched >= 5)
             {
                 for (int i = 0; i < *num_cpus; ++i)
                 {
@@ -154,7 +183,12 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
                         user[i] = u;
                         nice[i] = n;
                         system[i] = s;
-                        idle[i] = idl;
+                        unsigned long long idle_agg = idl + (matched >= 6 ? iw : 0);
+                        idle[i] = idle_agg;
+                        unsigned long long t = u + n + s + idl + (matched >= 6 ? iw : 0) + (matched >= 7 ? irq : 0) +
+                                              (matched >= 8 ? soft : 0) + (matched >= 9 ? steal : 0) +
+                                              (matched >= 10 ? guest : 0) + (matched >= 11 ? guest_nice : 0);
+                        total[i] = t;
                         found++;
                         break;
                     }
@@ -168,7 +202,6 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
     if (fclose(fp) != 0)
     {
         fprintf(stderr, "Error: Could not close %s: %s\n", STAT_FILE, strerror(errno));
-        printf("]%s", COLOR_RESET);
     }
     return 0;
 }
@@ -177,29 +210,28 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
 // Reads CPU stats twice to calculate usage, then prints a line for each core with usage and frequency
 void print_core_usage_bars()
 {
-    unsigned long long user1[MAX_CPUS], nice1[MAX_CPUS], system1[MAX_CPUS], idle1[MAX_CPUS];
-    unsigned long long user2[MAX_CPUS], nice2[MAX_CPUS], system2[MAX_CPUS], idle2[MAX_CPUS];
+    unsigned long long user1[MAX_CPUS], nice1[MAX_CPUS], system1[MAX_CPUS], idle1[MAX_CPUS], total1[MAX_CPUS];
+    unsigned long long user2[MAX_CPUS], nice2[MAX_CPUS], system2[MAX_CPUS], idle2[MAX_CPUS], total2[MAX_CPUS];
     int cpu_ids[MAX_CPUS];
     int num_cpus = 0;
     // First read: get initial CPU stats and core IDs
-    if (read_cpu_stats(user1, nice1, system1, idle1, cpu_ids, &num_cpus) != 0)
+    if (read_cpu_stats(user1, nice1, system1, idle1, total1, cpu_ids, &num_cpus) != 0)
     {
         fprintf(stderr, "Error: Could not read CPU statistics.\n");
-        printf("]%s", COLOR_RESET);
         return;
     }
     // Wait for the next sample
-    if (usleep(TIME_BETWEEN_SAMPLES_US) != 0)
+    struct timespec ts = {0, g_interval_us * 1000};
+    if (nanosleep(&ts, NULL) != 0)
     {
-        fprintf(stderr, "Error: usleep failed: %s\n", strerror(errno));
-        printf("]%s", COLOR_RESET);
-        return;
+        if (errno != EINTR)
+            fprintf(stderr, "Error: nanosleep failed: %s\n", strerror(errno));
+        // even if interrupted, continue with second read
     }
     // Second read: get updated CPU stats
-    if (read_cpu_stats(user2, nice2, system2, idle2, cpu_ids, &num_cpus) != 0)
+    if (read_cpu_stats(user2, nice2, system2, idle2, total2, cpu_ids, &num_cpus) != 0)
     {
         fprintf(stderr, "Error: Could not read CPU statistics (second measurement).\n");
-        printf("]%s", COLOR_RESET);
         return;
     }
     printf("\n");
@@ -207,7 +239,6 @@ void print_core_usage_bars()
     // Get terminal width for centering
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1)
     {
-        fprintf(stderr, "Error: Could not get terminal size: %s\n", strerror(errno));
         w.ws_col = TERM_WIDTH_FALLBACK;
     }
     int width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
@@ -216,17 +247,15 @@ void print_core_usage_bars()
     if (n < 0 || n >= (int)sizeof(line_template))
     {
         fprintf(stderr, "Error: snprintf failed.\n");
-        printf("]%s", COLOR_RESET);
         return;
     }
-    int len = strlen(line_template) + BAR_WIDTH + strlen(COLOR_RESET) + 2;
+    int len = strlen(line_template) + g_bar_width + strlen(COLOR_RESET) + 2;
     int pad = (width - len) / 2;
     if (pad < 0)
         pad = 0;
     if (print_centered("=== CPU Usage & Frequency per Core ===\n\n") == -1)
     {
         fprintf(stderr, "Error: Could not print centered title.\n");
-        printf("]%s", COLOR_RESET);
         return;
     }
     // Print table header
@@ -235,10 +264,8 @@ void print_core_usage_bars()
     {
         int cpu_id = cpu_ids[i];
         // Calculate usage deltas
-        unsigned long long total1 = user1[i] + nice1[i] + system1[i] + idle1[i];
-        unsigned long long total2 = user2[i] + nice2[i] + system2[i] + idle2[i];
         unsigned long long idle_diff = idle2[i] - idle1[i];
-        unsigned long long total_diff = total2 - total1;
+        unsigned long long total_diff = total2[i] - total1[i];
         float usage = total_diff ? 100.0f * (total_diff - idle_diff) / total_diff : 0.0f;
         // Read current frequency from sysfs
         char path[128], buf[64];
@@ -279,16 +306,9 @@ void print_core_usage_bars()
             fprintf(stderr, "Error: snprintf failed for line.\n");
             continue;
         }
-        // Get terminal width for centering
-        struct winsize w2;
-        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w2) == -1)
-        {
-            fprintf(stderr, "Error: Could not get terminal size: %s\n", strerror(errno));
-            w2.ws_col = TERM_WIDTH_FALLBACK;
-        }
-        int width2 = w2.ws_col > 0 ? w2.ws_col : TERM_WIDTH_FALLBACK;
-        int len2 = strlen(line) + BAR_WIDTH + strlen(COLOR_RESET) + 2;
-        int pad2 = (width2 - len2) / 2;
+        // Compute padding using previously determined terminal width
+        int len2 = strlen(line) + g_bar_width + strlen(COLOR_RESET) + 2;
+        int pad2 = (width - len2) / 2;
         // Print the line centered
         if (pad2 > 0)
             printf("%*s%s", pad2, "", line);
@@ -353,7 +373,7 @@ void print_cpu_temperature()
         // Dummy-Label and dummy frequency for harmonic line
         char line[256];
         snprintf(line, sizeof(line), "CPU Temp: %3.1f°C ", temp_value);
-        int len = strlen(line) + BAR_WIDTH + strlen(COLOR_RESET) + 2;
+        int len = strlen(line) + g_bar_width + strlen(COLOR_RESET) + 2;
         int pad = (width - len) / 2;
         if (pad < 0)
             pad = 0;
@@ -387,7 +407,6 @@ void set_nonblocking_terminal(int enable)
         if (tcgetattr(STDIN_FILENO, &oldt) == -1)
         {
             perror("Error: tcgetattr failed");
-            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
         newt = oldt;
@@ -396,14 +415,12 @@ void set_nonblocking_terminal(int enable)
         if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) == -1)
         {
             perror("Error: tcsetattr failed");
-            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
         // Set non-blocking input
         if (fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == -1)
         {
             perror("Error: fcntl (O_NONBLOCK) failed");
-            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
     }
@@ -413,91 +430,173 @@ void set_nonblocking_terminal(int enable)
         if (tcsetattr(STDIN_FILENO, TCSANOW, &oldt) == -1)
         {
             perror("Error: tcsetattr (restore) failed");
-            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
         if (fcntl(STDIN_FILENO, F_SETFL, 0) == -1)
         {
             perror("Error: fcntl (restore) failed");
-            printf("]%s", COLOR_RESET);
             exit(EXIT_FAILURE);
         }
     }
 }
 
-// Signal handler for SIGINT (Ctrl+C)
-// Restores terminal settings and exits the program
-void handle_sigint(int sig)
+static void restore_terminal(void)
 {
     if (terminal_modified && isatty(STDIN_FILENO))
     {
         set_nonblocking_terminal(0);
         terminal_modified = 0;
     }
-    printf("\nProgram terminated by signal.\n");
-    printf("%s", COLOR_RESET);
-    exit(0);
+}
+
+static void signal_handler(int sig)
+{
+    if (sig == SIGWINCH)
+    {
+        g_winch = 1;
+        return;
+    }
+    g_should_terminate = 1;
+}
+
+static int setup_signal_handlers(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, NULL) == -1)
+        return -1;
+    if (sigaction(SIGTERM, &sa, NULL) == -1)
+        return -1;
+    if (sigaction(SIGHUP, &sa, NULL) == -1)
+        return -1;
+    if (sigaction(SIGWINCH, &sa, NULL) == -1)
+        return -1;
+    return 0;
 }
 
 // Main function: Entry point of the program
 // Sets up signal handler, configures terminal, and runs the main loop
-int main()
+int main(int argc, char **argv)
 {
-    // Set up signal handler for SIGINT
-    if (signal(SIGINT, handle_sigint) == SIG_ERR)
+    // Parse CLI options
+    static struct option long_opts[] = {
+        {"interval", required_argument, 0, 'i'},
+        {"bar-width", required_argument, 0, 'w'},
+        {"no-color", no_argument, 0, 'c'},
+        {"no-temp", no_argument, 0, 't'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "", long_opts, NULL)) != -1)
     {
-        fprintf(stderr, "Error: Could not set signal handler: %s\n", strerror(errno));
-        printf("]%s", COLOR_RESET);
+        switch (opt)
+        {
+        case 'i':
+        {
+            long ms = strtol(optarg, NULL, 10);
+            if (ms > 0 && ms < 60000)
+                g_interval_us = (int)ms * 1000;
+            break;
+        }
+        case 'w':
+        {
+            long w = strtol(optarg, NULL, 10);
+            if (w >= 5 && w <= 200)
+                g_bar_width = (int)w;
+            break;
+        }
+        case 'c':
+            g_use_color = 0;
+            break;
+        case 't':
+            g_show_temp = 0;
+            break;
+        case 'h':
+        default:
+            printf("coreusage v.%s\n", VERSION);
+            printf("Options:\n");
+            printf("  --interval <ms>   Sample interval (default %d ms)\n", TIME_BETWEEN_SAMPLES_US / 1000);
+            printf("  --bar-width <n>   Width of the bar (default %d)\n", BAR_WIDTH);
+            printf("  --no-color        Disable ANSI colors\n");
+            printf("  --no-temp         Hide temperature line\n");
+            return 0;
+        }
+    }
+    // Set up signal handlers and terminal cleanup
+    if (setup_signal_handlers() == -1)
+    {
+        fprintf(stderr, "Error: Could not set signal handlers: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }
+    atexit(restore_terminal);
     if (isatty(STDIN_FILENO))
     {
         set_nonblocking_terminal(1);
         terminal_modified = 1;
     }
+    // Initialize libsensors once
+    if (sensors_init(NULL) != 0)
+    {
+        fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
+        return EXIT_FAILURE;
+    }
     int quit = 0;
     while (!quit)
     {
+        if (g_should_terminate)
+        {
+            quit = 1;
+            break;
+        }
+        // If terminal size changed, just clear and continue
+        if (g_winch)
+        {
+            g_winch = 0;
+        }
         // Clear screen using ANSI escape codes
         printf("\033[H\033[J");
-
-        // Load default config file
-        if (sensors_init(NULL) != 0)
-        {
-            fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
-            printf("]%s", COLOR_RESET);
-            return EXIT_FAILURE;
-        }
         // Print CPU usage and frequency for all cores
         print_core_usage_bars();
-        // Print CPU temperature
-        print_cpu_temperature();
+        // Print CPU temperature (optional)
+        if (g_show_temp)
+            print_cpu_temperature();
         // Print quit message centered
         if (print_centered("\nPress 'q' or ESC to quit.\n") == -1)
         {
             fprintf(stderr, "Error: Could not print centered quit message.\n");
-            printf("]%s", COLOR_RESET);
             return EXIT_FAILURE;
         }
-        // Flush output
+        // Flush output before entering input polling (important for non-tty stdout)
         if (fflush(stdout) == EOF)
         {
             perror("Error: fflush failed");
-            printf("]%s", COLOR_RESET);
         }
         // Poll for user input every 50ms, up to 1 second
         for (int i = 0; i < 10; ++i)
         {
-            int c = getchar();
-            if (c == 'q' || c == KEY_ESC)
+            if (g_should_terminate)
             {
                 quit = 1;
                 break;
             }
-            if (usleep(TIME_BETWEEN_KEY_POLL_US) != 0)
+            if (isatty(STDIN_FILENO))
             {
-                fprintf(stderr, "Error: usleep failed: %s\n", strerror(errno));
-                printf("]%s", COLOR_RESET);
+                int c = getchar();
+                if (c == 'q' || c == KEY_ESC)
+                {
+                    quit = 1;
+                    break;
+                }
+            }
+            struct timespec ts_poll = {0, TIME_BETWEEN_KEY_POLL_US * 1000};
+            if (nanosleep(&ts_poll, NULL) != 0)
+            {
+                if (errno != EINTR)
+                    fprintf(stderr, "Error: nanosleep failed: %s\n", strerror(errno));
             }
         }
     }
@@ -511,7 +610,6 @@ int main()
     if (print_centered("coreusage v." VERSION " - libsensors v.%s - Exiting...\n", libsensors_version != NULL ? libsensors_version : "unknown") == -1)
     {
         fprintf(stderr, "Error: Could not print centered exit message.\n");
-        printf("]%s", COLOR_RESET);
         return EXIT_FAILURE;
     }
     sensors_cleanup();
