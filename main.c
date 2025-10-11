@@ -25,7 +25,7 @@
 #include <time.h>
 #include <getopt.h>
 
-#define VERSION "1.0.2"
+#define VERSION "1.0.3"
 #define MAX_CPUS 256 // Maximum number of CPU cores supported
 #define BAR_WIDTH 40 // Width of the usage bar
 #define COLOR_RESET "\033[0m"
@@ -41,6 +41,9 @@
 static int terminal_modified = 0;
 static volatile sig_atomic_t g_should_terminate = 0;
 static volatile sig_atomic_t g_winch = 0;
+
+// Function declarations
+static void cleanup_and_exit(int exit_code);
 
 // Runtime-configurable settings
 static int g_bar_width = BAR_WIDTH;
@@ -106,6 +109,12 @@ int print_centered(const char *fmt, ...)
         fprintf(stderr, "Error: Formatting failed.\n");
         return -1;
     }
+    // Check for buffer overflow
+    if (n >= (int)sizeof(buf))
+    {
+        fprintf(stderr, "Error: Formatted string too long.\n");
+        return -1;
+    }
     int len = strlen(buf);
     int pad = (width - len) / 2;
     // Print padding and then the string
@@ -128,7 +137,7 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
         fprintf(stderr, "Error: Could not open %s: %s\n", STAT_FILE, strerror(errno));
         return -1;
     }
-    char line[256];
+    char line[512]; // Increased buffer size for safety
     if (cpu_ids == NULL || *num_cpus == 0)
     {
         int found_cpus = 0;
@@ -268,11 +277,17 @@ void print_core_usage_bars()
         unsigned long long total_diff = total2[i] - total1[i];
         float usage = total_diff ? 100.0f * (total_diff - idle_diff) / total_diff : 0.0f;
         // Read current frequency from sysfs
-        char path[128], buf[64];
+        char path[256], buf[128]; // Increased buffer sizes for safety
         int npath = snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu_id);
         if (npath < 0 || npath >= (int)sizeof(path))
         {
             fprintf(stderr, "Error: snprintf failed for path.\n");
+            continue;
+        }
+        // Validate path doesn't contain dangerous characters
+        if (strstr(path, "..") != NULL || strchr(path, '/') != path)
+        {
+            fprintf(stderr, "Error: Invalid path detected.\n");
             continue;
         }
         FILE *fp = fopen(path, "r");
@@ -285,8 +300,19 @@ void print_core_usage_bars()
         // Read frequency value
         if (fgets(buf, sizeof(buf), fp))
         {
-            int freq_khz = atoi(buf);
-            freq_mhz = freq_khz / 1000.0f;
+            char *endptr;
+            long freq_khz = strtol(buf, &endptr, 10);
+            // Validate the conversion
+            if (endptr != buf && *endptr == '\n' && freq_khz >= 0 && freq_khz <= 10000000)
+            {
+                freq_mhz = freq_khz / 1000.0f;
+            }
+            else
+            {
+                fprintf(stderr, "Error: Invalid frequency value in %s\n", path);
+                fclose(fp);
+                continue;
+            }
         }
         else
         {
@@ -407,7 +433,7 @@ void set_nonblocking_terminal(int enable)
         if (tcgetattr(STDIN_FILENO, &oldt) == -1)
         {
             perror("Error: tcgetattr failed");
-            exit(EXIT_FAILURE);
+            cleanup_and_exit(EXIT_FAILURE);
         }
         newt = oldt;
         // Disable canonical mode and echo
@@ -415,13 +441,13 @@ void set_nonblocking_terminal(int enable)
         if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) == -1)
         {
             perror("Error: tcsetattr failed");
-            exit(EXIT_FAILURE);
+            cleanup_and_exit(EXIT_FAILURE);
         }
         // Set non-blocking input
         if (fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == -1)
         {
             perror("Error: fcntl (O_NONBLOCK) failed");
-            exit(EXIT_FAILURE);
+            cleanup_and_exit(EXIT_FAILURE);
         }
     }
     else
@@ -447,6 +473,19 @@ static void restore_terminal(void)
         set_nonblocking_terminal(0);
         terminal_modified = 0;
     }
+}
+
+static void cleanup_and_exit(int exit_code)
+{
+    // Restore terminal settings
+    if (terminal_modified && isatty(STDIN_FILENO))
+    {
+        set_nonblocking_terminal(0);
+        terminal_modified = 0;
+    }
+    // Cleanup libsensors
+    sensors_cleanup();
+    exit(exit_code);
 }
 
 static void signal_handler(int sig)
@@ -497,16 +536,28 @@ int main(int argc, char **argv)
         {
         case 'i':
         {
-            long ms = strtol(optarg, NULL, 10);
-            if (ms > 0 && ms < 60000)
-                g_interval_us = (int)ms * 1000;
+            char *endptr;
+            long ms = strtol(optarg, &endptr, 10);
+            // Check for conversion errors and invalid input
+            if (endptr == optarg || *endptr != '\0' || ms <= 0 || ms >= 60000)
+            {
+                fprintf(stderr, "Error: Invalid interval value '%s'. Must be a positive integer < 60000.\n", optarg);
+                cleanup_and_exit(EXIT_FAILURE);
+            }
+            g_interval_us = (int)ms * 1000;
             break;
         }
         case 'w':
         {
-            long w = strtol(optarg, NULL, 10);
-            if (w >= 5 && w <= 200)
-                g_bar_width = (int)w;
+            char *endptr;
+            long w = strtol(optarg, &endptr, 10);
+            // Check for conversion errors and invalid input
+            if (endptr == optarg || *endptr != '\0' || w < 5 || w > 200)
+            {
+                fprintf(stderr, "Error: Invalid bar width value '%s'. Must be an integer between 5 and 200.\n", optarg);
+                cleanup_and_exit(EXIT_FAILURE);
+            }
+            g_bar_width = (int)w;
             break;
         }
         case 'c':
@@ -530,7 +581,7 @@ int main(int argc, char **argv)
     if (setup_signal_handlers() == -1)
     {
         fprintf(stderr, "Error: Could not set signal handlers: %s\n", strerror(errno));
-        return EXIT_FAILURE;
+        cleanup_and_exit(EXIT_FAILURE);
     }
     atexit(restore_terminal);
     if (isatty(STDIN_FILENO))
@@ -542,7 +593,7 @@ int main(int argc, char **argv)
     if (sensors_init(NULL) != 0)
     {
         fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
-        return EXIT_FAILURE;
+        cleanup_and_exit(EXIT_FAILURE);
     }
     int quit = 0;
     while (!quit)
@@ -568,7 +619,7 @@ int main(int argc, char **argv)
         if (print_centered("\nPress 'q' or ESC to quit.\n") == -1)
         {
             fprintf(stderr, "Error: Could not print centered quit message.\n");
-            return EXIT_FAILURE;
+            cleanup_and_exit(EXIT_FAILURE);
         }
         // Flush output before entering input polling (important for non-tty stdout)
         if (fflush(stdout) == EOF)
@@ -610,7 +661,7 @@ int main(int argc, char **argv)
     if (print_centered("coreusage v." VERSION " - libsensors v.%s - Exiting...\n", libsensors_version != NULL ? libsensors_version : "unknown") == -1)
     {
         fprintf(stderr, "Error: Could not print centered exit message.\n");
-        return EXIT_FAILURE;
+        cleanup_and_exit(EXIT_FAILURE);
     }
     sensors_cleanup();
     return 0;

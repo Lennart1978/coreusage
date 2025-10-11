@@ -1,8 +1,8 @@
 CC=gcc
 CPPFLAGS+=-D_POSIX_C_SOURCE=200809L
 CFLAGS?=-O3 -std=c23
-CFLAGS+=-Wall -Wextra -Wpedantic
-LDLIBS+=-lsensors
+CFLAGS+=-Wall -Wextra -Wpedantic -Wformat=2 -Wformat-security -Wstack-protector -fstack-protector-strong -fPIE -D_FORTIFY_SOURCE=2
+LDLIBS+=-lsensors -pie
 
 # Verzeichnisse
 PREFIX=/usr/local
