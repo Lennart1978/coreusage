@@ -1,18 +1,19 @@
 # coreusage
 
-Ein kleines Linux-CLI-Tool zur Anzeige der CPU-Auslastung je Kern.
+A small Linux CLI tool to display CPU usage per core, frequency, and memory usage.
 
-## Beschreibung
+## Description
 
-Leichtgewichtiges CLI-Programm zur Anzeige der aktuellen CPU-Auslastung und Taktfrequenz pro Kern inklusive Balkengrafik. Läuft sauber in TTYs und gibt sinnvolle Ausgabe auch als Pipe (ohne TTY) aus.
+Lightweight CLI program to display current CPU usage and clock frequency per core, including bar graphs. It also monitors system memory (RAM) usage.
+The tool runs cleanly in TTYs, supports flicker-free rendering, and provides meaningful output even when piped (without TTY).
 
 ## Build
 
-Voraussetzungen:
+Prerequisites:
 
-- GCC oder kompatibler C-Compiler
+- GCC or compatible C compiler
 - Make
-- libsensors-Entwicklerpaket (üblicherweise `lm_sensors` oder `libsensors-dev`)
+- libsensors development package (usually `lm_sensors` or `libsensors-dev`)
 
 To compile, run in the project directory:
 
@@ -20,9 +21,9 @@ To compile, run in the project directory:
 make
 ```
 
-Das erzeugt das Binary: `coreusage`
+This generates the binary: `coreusage`
 
-Debug-Build mit Sanitizern:
+Debug build with sanitizers:
 
 ```bash
 make clean && make debug
@@ -34,49 +35,50 @@ make clean && make debug
 sudo make install
 ```
 
-## Deinstallation
+## Uninstallation
 
 ```bash
 sudo make uninstall
 ```
 
-## Verwendung
+## Usage
 
 ```bash
 coreusage [--interval <ms>] [--bar-width <n>] [--no-color] [--no-temp] [--help]
 ```
 
-Optionen:
+Options:
 
-- `--interval <ms>`: Abtastintervall in Millisekunden (Standard: 200)
-- `--bar-width <n>`: Breite des Auslastungsbalkens (Standard: 40)
-- `--no-color`: ANSI-Farben deaktivieren (nützlich für Pipes/Logs)
-- `--no-temp`: Temperaturzeile ausblenden
-- `--help`: Hilfe anzeigen
+- `--interval <ms>`: Sampling interval in milliseconds (Default: 200)
+- `--bar-width <n>`: Width of the usage bar (Default: 40)
+- `--no-color`: Disable ANSI colors (useful for pipes/logs)
+- `--no-temp`: Hide temperature line
+- `--help`: Show help
 
-Beispiele:
+Examples:
 
 ```bash
-# Breitere Balken, schnelleres Intervall, ohne Farbe
+# Wider bars, faster interval, no color
 coreusage --bar-width 60 --interval 150 --no-color
 
-# Nur CPU-Auslastung und Frequenz, ohne Temperaturzeile
+# Only CPU usage and frequency, without temperature line
 coreusage --no-temp
 ```
 
-Hinweise:
+Notes:
 
-- Farben werden automatisch nur auf TTYs genutzt; mit `--no-color` lassen sie sich erzwingen deaktivieren.
-- Beenden mit Taste `q` oder `ESC` sowie via Signalen (z. B. `Ctrl+C`).
+- Colors are automatically used only on TTYs; use `--no-color` to force disable them.
+- Exit with `q` or `ESC`, or via signals (e.g., `Ctrl+C`).
+- The tool uses `poll()` for efficient input handling and minimal CPU overhead.
 
 ## Screenshot
 
-![screenshot](screenshot.jpg)
+![screenshot](screenshot.png)
 
-## Lizenz
+## License
 
-MIT-Lizenz
+MIT License
 
-## Autor
+## Author
 
 (2025) Lennart Martens

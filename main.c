@@ -24,8 +24,9 @@
 #include <errno.h>
 #include <time.h>
 #include <getopt.h>
+#include <poll.h>
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.5"
 #define MAX_CPUS 256 // Maximum number of CPU cores supported
 #define BAR_WIDTH 40 // Width of the usage bar
 #define COLOR_RESET "\033[0m"
@@ -216,33 +217,40 @@ int read_cpu_stats(unsigned long long user[], unsigned long long nice[], unsigne
 }
 
 // For each core, print frequency, usage and progress bar in one centered line
-// Reads CPU stats twice to calculate usage, then prints a line for each core with usage and frequency
+// Uses static variables to store previous stats, so we don't need to sleep inside the function
 void print_core_usage_bars()
 {
-    unsigned long long user1[MAX_CPUS], nice1[MAX_CPUS], system1[MAX_CPUS], idle1[MAX_CPUS], total1[MAX_CPUS];
-    unsigned long long user2[MAX_CPUS], nice2[MAX_CPUS], system2[MAX_CPUS], idle2[MAX_CPUS], total2[MAX_CPUS];
-    int cpu_ids[MAX_CPUS];
-    int num_cpus = 0;
-    // First read: get initial CPU stats and core IDs
-    if (read_cpu_stats(user1, nice1, system1, idle1, total1, cpu_ids, &num_cpus) != 0)
+    static unsigned long long user_prev[MAX_CPUS], nice_prev[MAX_CPUS], system_prev[MAX_CPUS], idle_prev[MAX_CPUS], total_prev[MAX_CPUS];
+    static int cpu_ids[MAX_CPUS];
+    static int num_cpus = 0;
+    static int first_run = 1;
+
+    unsigned long long user_curr[MAX_CPUS], nice_curr[MAX_CPUS], system_curr[MAX_CPUS], idle_curr[MAX_CPUS], total_curr[MAX_CPUS];
+    int current_num_cpus = num_cpus; // Use known count or 0 for first run
+
+    // Read current stats
+    if (read_cpu_stats(user_curr, nice_curr, system_curr, idle_curr, total_curr, cpu_ids, &current_num_cpus) != 0)
     {
         fprintf(stderr, "Error: Could not read CPU statistics.\n");
         return;
     }
-    // Wait for the next sample
-    struct timespec ts = {0, g_interval_us * 1000};
-    if (nanosleep(&ts, NULL) != 0)
+    
+    // Update num_cpus if it was the first run
+    if (first_run)
     {
-        if (errno != EINTR)
-            fprintf(stderr, "Error: nanosleep failed: %s\n", strerror(errno));
-        // even if interrupted, continue with second read
+        num_cpus = current_num_cpus;
+        // Initialize previous stats with current to avoid huge spikes on first frame
+        // or just return and wait for next frame. Returning is cleaner.
+        memcpy(user_prev, user_curr, sizeof(user_curr));
+        memcpy(nice_prev, nice_curr, sizeof(nice_curr));
+        memcpy(system_prev, system_curr, sizeof(system_curr));
+        memcpy(idle_prev, idle_curr, sizeof(idle_curr));
+        memcpy(total_prev, total_curr, sizeof(total_curr));
+        first_run = 0;
+        // We can't calculate usage yet, so just print 0% or return
+        // Let's print 0% for the first frame to show the layout immediately
     }
-    // Second read: get updated CPU stats
-    if (read_cpu_stats(user2, nice2, system2, idle2, total2, cpu_ids, &num_cpus) != 0)
-    {
-        fprintf(stderr, "Error: Could not read CPU statistics (second measurement).\n");
-        return;
-    }
+
     printf("\n");
     struct winsize w;
     // Get terminal width for centering
@@ -273,9 +281,17 @@ void print_core_usage_bars()
     {
         int cpu_id = cpu_ids[i];
         // Calculate usage deltas
-        unsigned long long idle_diff = idle2[i] - idle1[i];
-        unsigned long long total_diff = total2[i] - total1[i];
+        unsigned long long idle_diff = idle_curr[i] - idle_prev[i];
+        unsigned long long total_diff = total_curr[i] - total_prev[i];
         float usage = total_diff ? 100.0f * (total_diff - idle_diff) / total_diff : 0.0f;
+        
+        // Update previous stats for next time
+        user_prev[i] = user_curr[i];
+        nice_prev[i] = nice_curr[i];
+        system_prev[i] = system_curr[i];
+        idle_prev[i] = idle_curr[i];
+        total_prev[i] = total_curr[i];
+
         // Read current frequency from sysfs
         char path[256], buf[128]; // Increased buffer sizes for safety
         int npath = snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu_id);
@@ -293,37 +309,28 @@ void print_core_usage_bars()
         FILE *fp = fopen(path, "r");
         if (!fp)
         {
-            fprintf(stderr, "Error: Could not open %s: %s\n", path, strerror(errno));
-            continue;
+            // Try fallback if scaling_cur_freq is not available, maybe cpuinfo_cur_freq
+             snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_cur_freq", cpu_id);
+             fp = fopen(path, "r");
         }
+        
         float freq_mhz = 0.0f;
-        // Read frequency value
-        if (fgets(buf, sizeof(buf), fp))
+        if (fp)
         {
-            char *endptr;
-            long freq_khz = strtol(buf, &endptr, 10);
-            // Validate the conversion
-            if (endptr != buf && *endptr == '\n' && freq_khz >= 0 && freq_khz <= 10000000)
+            // Read frequency value
+            if (fgets(buf, sizeof(buf), fp))
             {
-                freq_mhz = freq_khz / 1000.0f;
+                char *endptr;
+                long freq_khz = strtol(buf, &endptr, 10);
+                // Validate the conversion
+                if (endptr != buf && *endptr == '\n' && freq_khz >= 0 && freq_khz <= 10000000)
+                {
+                    freq_mhz = freq_khz / 1000.0f;
+                }
             }
-            else
-            {
-                fprintf(stderr, "Error: Invalid frequency value in %s\n", path);
-                fclose(fp);
-                continue;
-            }
-        }
-        else
-        {
-            fprintf(stderr, "Error: Could not read frequency from %s: %s\n", path, strerror(errno));
             fclose(fp);
-            continue;
         }
-        if (fclose(fp) != 0)
-        {
-            fprintf(stderr, "Error: Could not close %s: %s\n", path, strerror(errno));
-        }
+        
         // Prepare the line for this core
         char line[256];
         int nline = snprintf(line, sizeof(line), "CPU %-3d %6.1f%%  %8.2f MHz  ", cpu_id, usage, freq_mhz);
@@ -419,6 +426,77 @@ void print_cpu_temperature()
     else
     {
         print_centered("CPU temperature: not available\n");
+    }
+}
+
+// Helper function: Prints the Memory usage
+void print_memory_usage()
+{
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (!fp)
+    {
+        return;
+    }
+
+    char line[256];
+    unsigned long long total_mem = 0;
+    unsigned long long free_mem = 0;
+    unsigned long long buffers = 0;
+    unsigned long long cached = 0;
+    unsigned long long s_reclaimable = 0;
+    unsigned long long shmem = 0;
+
+    while (fgets(line, sizeof(line), fp))
+    {
+        if (strncmp(line, "MemTotal:", 9) == 0)
+            sscanf(line, "MemTotal: %llu kB", &total_mem);
+        else if (strncmp(line, "MemFree:", 8) == 0)
+            sscanf(line, "MemFree: %llu kB", &free_mem);
+        else if (strncmp(line, "Buffers:", 8) == 0)
+            sscanf(line, "Buffers: %llu kB", &buffers);
+        else if (strncmp(line, "Cached:", 7) == 0)
+            sscanf(line, "Cached: %llu kB", &cached);
+        else if (strncmp(line, "SReclaimable:", 13) == 0)
+            sscanf(line, "SReclaimable: %llu kB", &s_reclaimable);
+        else if (strncmp(line, "Shmem:", 6) == 0)
+            sscanf(line, "Shmem: %llu kB", &shmem);
+    }
+    fclose(fp);
+
+    if (total_mem > 0)
+    {
+        // Calculate used memory (htop style: used = total - free - buffers - cached - sreclaimable + shmem)
+        // Note: 'cached' in /proc/meminfo includes shmem, so if we subtract cached, we subtract shmem too.
+        // Usually "available" is a better metric, but for "used" bar:
+        // Used = Total - Free - Buffers - Cached - SReclaimable
+        // (Shmem is part of Cached, so it is excluded from "Used" in this calculation, which is consistent with "green" bar in htop)
+        
+        unsigned long long used_mem = total_mem - free_mem - buffers - cached - s_reclaimable;
+        
+        // Convert to MB for display
+        double total_mb = total_mem / 1024.0;
+        double used_mb = used_mem / 1024.0;
+        float percent = (float)used_mem / total_mem * 100.0f;
+
+        struct winsize w;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1)
+            w.ws_col = TERM_WIDTH_FALLBACK;
+        int width = w.ws_col > 0 ? w.ws_col : TERM_WIDTH_FALLBACK;
+
+        char line_buf[256];
+        snprintf(line_buf, sizeof(line_buf), "Mem: %6.0f/%-6.0f MB ", used_mb, total_mb);
+        
+        int len = strlen(line_buf) + g_bar_width + strlen(COLOR_RESET) + 2;
+        int pad = (width - len) / 2;
+        if (pad < 0) pad = 0;
+
+        if (pad > 0)
+            printf("\n%*s%s", pad, "", line_buf);
+        else
+            printf("\n%s", line_buf);
+            
+        print_bar(percent);
+        printf("\n");
     }
 }
 
@@ -595,6 +673,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "Error: Could not initialize libsensors: %s\n", sensors_strerror(errno));
         cleanup_and_exit(EXIT_FAILURE);
     }
+
+    // Initial clear
+    printf("\033[H\033[J");
+
+    struct pollfd fds[1];
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN;
+
     int quit = 0;
     while (!quit)
     {
@@ -603,53 +689,69 @@ int main(int argc, char **argv)
             quit = 1;
             break;
         }
-        // If terminal size changed, just clear and continue
+        
+        // If terminal size changed, we might want to clear once to reset layout
         if (g_winch)
         {
             g_winch = 0;
+            printf("\033[H\033[J");
         }
-        // Clear screen using ANSI escape codes
-        printf("\033[H\033[J");
+        else
+        {
+            // Move cursor to home instead of clearing
+            printf("\033[H");
+        }
+
         // Print CPU usage and frequency for all cores
         print_core_usage_bars();
         // Print CPU temperature (optional)
         if (g_show_temp)
             print_cpu_temperature();
+        
+        // Print Memory usage
+        print_memory_usage();
+        
+        // Clear rest of the screen to remove potential artifacts from previous frames
+        // if the output became shorter (unlikely here, but good practice)
+        printf("\033[J");
+
         // Print quit message centered
         if (print_centered("\nPress 'q' or ESC to quit.\n") == -1)
         {
             fprintf(stderr, "Error: Could not print centered quit message.\n");
             cleanup_and_exit(EXIT_FAILURE);
         }
-        // Flush output before entering input polling (important for non-tty stdout)
+        
+        // Flush output
         if (fflush(stdout) == EOF)
         {
             perror("Error: fflush failed");
         }
-        // Poll for user input every 50ms, up to 1 second
-        for (int i = 0; i < 10; ++i)
+
+        // Wait for input or timeout (interval)
+        // poll takes milliseconds
+        int ret = poll(fds, 1, g_interval_us / 1000);
+        
+        if (ret > 0)
         {
-            if (g_should_terminate)
-            {
-                quit = 1;
-                break;
-            }
-            if (isatty(STDIN_FILENO))
+            if (fds[0].revents & POLLIN)
             {
                 int c = getchar();
                 if (c == 'q' || c == KEY_ESC)
                 {
                     quit = 1;
-                    break;
                 }
             }
-            struct timespec ts_poll = {0, TIME_BETWEEN_KEY_POLL_US * 1000};
-            if (nanosleep(&ts_poll, NULL) != 0)
+        }
+        else if (ret == -1)
+        {
+            if (errno != EINTR)
             {
-                if (errno != EINTR)
-                    fprintf(stderr, "Error: nanosleep failed: %s\n", strerror(errno));
+                perror("Error: poll failed");
+                cleanup_and_exit(EXIT_FAILURE);
             }
         }
+        // if ret == 0, timeout expired, loop continues to update
     }
     // Restore terminal settings
     if (terminal_modified && isatty(STDIN_FILENO))
