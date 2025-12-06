@@ -28,6 +28,9 @@ Debug build with sanitizers:
 ```bash
 make clean && make debug
 ```
+## Archlinux:
+
+There is "coreusage-git" in the AUR !
 
 ## Installation
 
